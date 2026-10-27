@@ -114,7 +114,8 @@
   .cell.best .num::after{content:" ★";color:var(--good)}
   .cell.h3.best .num::after,.cell.h4.best .num::after{color:var(--good-mid)}
   .cell.picked{outline:2px solid var(--text);outline-offset:-4px}
-  .legend{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--sub)}
+  .legend{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--sub);flex-wrap:wrap}
+  .legend span{white-space:nowrap}
   .legend i{display:inline-block;width:16px;height:12px;border:1px solid var(--grid)}
 
   /* 관리자 */
@@ -142,6 +143,8 @@
   .mx tr.pending td{color:var(--faint)}
   .mx tr.foot td{background:#f8f9fb;font-weight:600}
   .mx tr.foot td.nm{background:#f8f9fb}
+  .mx tr.mine td{font-weight:600}
+  .mx tr.mine td.nm{background:#eef4ff}
 
   @media (max-width:560px){ .cell{height:44px} }
 </style>
@@ -209,6 +212,32 @@ function mailText(r){
   return `[팀점심] ${r.title} 가능 날짜 체크 부탁드립니다.\n\n아래 링크에서 처음 한 번 본인 이름을 고른 뒤, 캘린더에서 가능한 날짜를 모두 눌러 저장해 주세요.\n${roundUrl(r.id)}\n\n후보 기간: ${dateSummary(r)}`;
 }
 function showError(msg){document.getElementById("banner").innerHTML=`<div class="banner err">${esc(msg)}</div>`}
+function fmtTime(ts){const d=new Date(ts);return [d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,"0")).join(":")}
+function syncText(ts){return ts?`자동 갱신 중 · 마지막 ${fmtTime(ts)}`:""}
+
+// ── 집계·응답표 (일반 현황과 관리자 결과 공용) ─
+function summarize(round,members,responses){
+  const dates=datesOf(round);
+  const rows=[...members,...Object.keys(responses).filter(n=>!members.includes(n))];
+  const heat={};dates.forEach(d=>heat[d]=0);
+  Object.values(responses).forEach(r=>(r.picks?.date||[]).forEach(d=>{if(d in heat)heat[d]++}));
+  const max=Math.max(0,...Object.values(heat));
+  const best=new Set(max>0?dates.filter(d=>heat[d]===max):[]);
+  const top=dates.filter(d=>heat[d]>0).sort((a,b)=>heat[b]-heat[a]||a.localeCompare(b)).slice(0,3);
+  return {dates,rows,heat,best,top,responded:members.filter(m=>responses[m]).length,pending:members.filter(m=>!responses[m])};
+}
+function topText(s){return s.top.length?`${fmtDate(s.top[0])} · ${s.heat[s.top[0]]}명`:"-"}
+function matrixHtml(s,responses,me){
+  if(!s.dates.length)return `<span class="muted">후보 날짜가 없어요.</span>`;
+  const head=s.dates.map(d=>{const w=parseYmd(d).getDay();
+    return `<th class="${w===0?"sun":w===6?"sat":""} ${s.best.has(d)?"best":""}">${fmtDate(d).split(" ")[0]}<div class="dow">${W[w]}</div></th>`}).join("");
+  const body=s.rows.map(n=>{const r=responses[n],p=new Set(r?.picks?.date||[]);
+    return `<tr class="${r?"":"pending"}${n===me?" mine":""}"><td class="nm">${esc(n)}${n===me?` <span class="sub">(나)</span>`:""}${r?"":` <span class="sub">미응답</span>`}</td>
+      ${s.dates.map(d=>`<td class="${p.has(d)?"y":""}">${p.has(d)?"●":""}</td>`).join("")}
+      <td>${r?p.size:"-"}</td></tr>`}).join("");
+  const foot=`<tr class="foot"><td class="nm">가능 인원</td>${s.dates.map(d=>`<td class="tot ${s.best.has(d)?"best":""}">${s.heat[d]}</td>`).join("")}<td></td></tr>`;
+  return `<div class="mx-wrap"><table class="mx"><thead><tr><th class="nm">이름</th>${head}<th>계</th></tr></thead><tbody>${body}${foot}</tbody></table></div>`;
+}
 
 // ── 한국 공휴일 ───────────────────────────────
 // 2026~2027: 인사혁신처 발표 기준(노동절·제헌절 공휴일, 대체공휴일 포함) 내장
@@ -267,7 +296,7 @@ function mountCalendar(el,o){
       if(!en){cls+=" off";attr=" disabled"}
       else if(o.heat){
         const c=o.heat[ds]||0,lv=c?Math.min(4,Math.ceil(c/o.total*4)):0;
-        cls+=` h${lv}`;if(o.best?.has(ds))cls+=" best";extra+=`<span class="cnt">${c}</span>`;
+        cls+=` h${lv}`;if(o.best?.has(ds))cls+=" best";if(!o.onPick)cls+=" ro";extra+=`<span class="cnt">${c}</span>`;
       }else{
         const on=o.selected.has(ds);if(on)cls+=" on";if(o.readOnly)cls+=" ro";attr=` aria-pressed="${on}"`;
       }
@@ -280,10 +309,10 @@ function mountCalendar(el,o){
 
   el.onpointerdown=el.onpointerover=el.onclick=null;
   if(o.heat){
-    el.onclick=e=>{
+    if(o.onPick)el.onclick=e=>{ // 관리자만: 칸을 누르면 명단 표시
       const c=e.target.closest(".cell[data-d]");if(!c||c.disabled)return;
       el.querySelectorAll(".picked").forEach(x=>x.classList.remove("picked"));c.classList.add("picked");
-      o.onPick?.(c.dataset.d);
+      o.onPick(c.dataset.d);
     };
     return;
   }
@@ -330,8 +359,7 @@ function firebaseData(fs,db){
     watchClaims(cb){return onSnapshot(collection(db,"claims"),{includeMetadataChanges:true},
       s=>{const o={};s.docs.forEach(d=>{if(!d.metadata.hasPendingWrites)o[d.id]=d.data()});cb(o)},onErr)},
     resetClaim(name){return deleteDoc(doc(db,"claims",name))},
-    watchMyResponse(id,name,cb){return onSnapshot(doc(db,"rounds",id,"responses",name),s=>cb(s.exists()?s.data():null),e=>{console.warn(e);cb(null)})},
-    watchResponses(id,cb){return onSnapshot(collection(db,"rounds",id,"responses"),s=>{const o={};s.docs.forEach(d=>o[d.id]=d.data());cb(o)},onErr)}
+    watchResponses(id,cb,onError){return onSnapshot(collection(db,"rounds",id,"responses"),s=>{const o={};s.docs.forEach(d=>o[d.id]=d.data());cb(o)},e=>{onErr(e);onError?.(e)})}
   };
 }
 function firebaseUserApi(app,fs,au){
@@ -372,7 +400,6 @@ function localApis(){
     async deleteRound(id){delete state.rounds[id];delete state.responses[id];save()},
     watchClaims(cb){return sub(()=>cb(clone(state.claims)))},
     async resetClaim(n){delete state.claims[n];save()},
-    watchMyResponse(id,name,cb){return sub(()=>{const r=state.responses[id]?.[name];cb(r?clone(r):null)})},
     watchResponses(id,cb){return sub(()=>cb(clone(state.responses[id]||{})))}
   };
   const UK="lunchpoll-demo-uid";let uid=lsGet(UK);const uSubs=new Set();
@@ -461,64 +488,66 @@ function renderHome(){
   }));
 }
 
-// ── 일반: 본인 확인 + 날짜 체크 ───────────────
+// ── 일반: 본인 확인 + 날짜 체크 + 전체 현황 ───
 function renderRound(id){
-  let round,loaded=false,members=null;
-  let sel=new Set(),dirty=false,saved=null,mineName=null,unsubMine=null;
+  let round,loaded=false,members=null,responses=null,respErr=false,lastSync=null;
+  let sel=new Set(),dirty=false,mineName=null;
 
-  // 내 이름이 정해지면 내 응답만 구독 (다른 사람 응답은 규칙상 읽을 수 없음)
-  const syncMine=()=>{
-    const name=ident.me||null;
-    if(name===mineName)return;
-    unsubMine?.();unsubMine=null;saved=null;dirty=false;sel=new Set();mineName=name;
-    if(name)unsubMine=userApi.watchMyResponse(id,name,r=>{saved=r;if(!dirty)sel=new Set(r?.picks?.date||[]);draw()});
-  };
+  const saved=()=>(mineName&&responses)?(responses[mineName]||null):null;
+  const resetSel=()=>{sel=new Set(saved()?.picks?.date||[]);dirty=false};
+  const ready=()=>loaded&&members!==null&&responses!==null&&ident.ready;
+  const touch=()=>{lastSync=Date.now()};
 
   const status=()=>{
     const el=document.getElementById("st");if(!el)return;
     el.innerHTML=dirty?`<span style="color:var(--warn)">${sel.size}일 선택 · 저장하지 않은 변경이 있어요</span>`
-      :saved?`저장됨 · ${sel.size}일 선택`:`${sel.size}일 선택 · 가능한 날이 없으면 비운 채로 저장하세요`;
+      :saved()?`저장됨 · ${sel.size}일 선택`:`${sel.size}일 선택 · 가능한 날이 없으면 비운 채로 저장하세요`;
   };
 
+  // 전체 다시 그리기 (회차·팀원·신원이 바뀔 때)
   const draw=()=>{
-    if(!loaded||members===null||!ident.ready)return;
+    if(!ready())return;
     if(!round){$view.innerHTML=`<div class="card">회차를 찾을 수 없어요. <a href="#/">목록으로</a></div>`;return}
-    const me=ident.me,claims=ident.claims,open=round.status==="open",dates=datesOf(round),cand=new Set(dates);
-    const head=`<div class="card"><h2>${esc(round.title)}${badge(round)}</h2><div class="sub">${esc(dateSummary(round))}</div></div>`;
+    $view.innerHTML=`
+      <div class="card"><h2>${esc(round.title)}${badge(round)}</h2><div class="sub">${esc(dateSummary(round))}</div></div>
+      <div id="mine"></div><div id="status"></div>`;
+    drawMine();drawStatus();
+  };
 
+  // 내 영역: 이름 선택 또는 내 캘린더
+  const drawMine=()=>{
+    const el=document.getElementById("mine");if(!el)return;
+    const me=ident.me,claims=ident.claims,open=round.status==="open",dates=datesOf(round),cand=new Set(dates);
     if(!me){
       const avail=members.filter(m=>!claims[m]);
-      $view.innerHTML=head+`
-        <div class="card">
-          <h3>본인 이름 선택</h3>
-          <div class="sub" style="margin-bottom:12px">처음 한 번만 고르면 이 브라우저에서 본인으로 인식돼요. 다른 사람의 응답은 볼 수 없어요.</div>
-          ${members.length?`<div class="chips">${members.map(m=>claims[m]
-              ?`<span class="chip taken" title="이미 등록된 이름">${esc(m)} · 등록됨</span>`
-              :`<button class="chip" data-act="claim" data-v="${esc(m)}">${esc(m)}</button>`).join("")}</div>`
-            :`<span class="muted">팀원이 아직 등록되지 않았어요.</span>`}
-          ${members.length&&!avail.length?`<div class="sub mt">모든 이름이 등록돼 있어요. 본인 이름이 이미 등록돼 있다면 관리자에게 초기화를 요청하세요.</div>`:""}
-        </div>`;
+      el.innerHTML=`<div class="card">
+        <h3>본인 이름 선택</h3>
+        <div class="sub" style="margin-bottom:12px">처음 한 번만 고르면 이 브라우저에서 본인으로 인식돼요. 응답 수정은 본인만 할 수 있어요.</div>
+        ${members.length?`<div class="chips">${members.map(m=>claims[m]
+            ?`<span class="chip taken" title="이미 등록된 이름">${esc(m)} · 등록됨</span>`
+            :`<button class="chip" data-act="claim" data-v="${esc(m)}">${esc(m)}</button>`).join("")}</div>`
+          :`<span class="muted">팀원이 아직 등록되지 않았어요.</span>`}
+        ${members.length&&!avail.length?`<div class="sub mt">모든 이름이 등록돼 있어요. 본인 이름이 이미 등록돼 있다면 관리자에게 초기화를 요청하세요.</div>`:""}
+      </div>`;
       return;
     }
-
-    $view.innerHTML=head+`
-      <div class="card">
-        <div class="row between" style="margin-bottom:4px">
-          <h3 style="margin:0">가능한 날짜 체크</h3>
-          <div class="row">
-            <button class="btn sm" data-act="all" ${open?"":"disabled"}>후보 전체 선택</button>
-            <button class="btn sm" data-act="none" ${open?"":"disabled"}>선택 지우기</button>
-          </div>
+    el.innerHTML=`<div class="card">
+      <div class="row between" style="margin-bottom:4px">
+        <h3 style="margin:0">가능한 날짜 체크</h3>
+        <div class="row">
+          <button class="btn sm" data-act="all" ${open?"":"disabled"}>후보 전체 선택</button>
+          <button class="btn sm" data-act="none" ${open?"":"disabled"}>선택 지우기</button>
         </div>
-        <div class="sub">👤 <b>${esc(me)}</b>님으로 응답 중 · 본인이 아니면 관리자에게 초기화를 요청하세요</div>
-        <div class="sub" style="margin:4px 0 12px">${open?"칸을 누르면 선택/해제돼요. PC에서는 드래그로 여러 날을 한 번에 칠할 수 있어요. 회색 칸은 후보가 아닌 날이에요."
-          :"마감된 회차라 수정할 수 없어요."}</div>
-        <div id="cal"></div>
-        <div class="row mt">
-          <button class="btn primary" data-act="save" ${open?"":"disabled"}>${saved?"수정 저장":"저장"}</button>
-          <span class="sub" id="st"></span>
-        </div>
-      </div>`;
+      </div>
+      <div class="sub">👤 <b>${esc(me)}</b>님으로 응답 중 · 본인이 아니면 관리자에게 초기화를 요청하세요</div>
+      <div class="sub" style="margin:4px 0 12px">${open?"칸을 누르면 선택/해제돼요. PC에서는 드래그로 여러 날을 한 번에 칠할 수 있어요. 회색 칸은 후보가 아닌 날이에요."
+        :"마감된 회차라 수정할 수 없어요."}</div>
+      <div id="cal"></div>
+      <div class="row mt">
+        <button class="btn primary" data-act="save" ${open?"":"disabled"}>${saved()?"수정 저장":"저장"}</button>
+        <span class="sub" id="st"></span>
+      </div>
+    </div>`;
     if(dates.length){
       mountCalendar(document.getElementById("cal"),{
         months:monthsBetween(dates[0],dates[dates.length-1]),
@@ -527,6 +556,28 @@ function renderRound(id){
       });
     }
     status();
+  };
+
+  // 전체 현황: 이름 없이 날짜별 가능 인원만(히트맵) + 요약 + 새로고침
+  const drawStatus=()=>{
+    const el=document.getElementById("status");if(!el)return;
+    const s=summarize(round,members,responses),cand=new Set(s.dates);
+    el.innerHTML=`<div class="card">
+      <div class="row between" style="margin-bottom:6px">
+        <h3 style="margin:0">전체 현황</h3>
+        <div class="row"><span class="sub">${syncText(lastSync)}</span><button class="btn sm" data-act="refresh">↻ 새로고침</button></div>
+      </div>
+      ${respErr?`<div class="sub">현황을 불러오지 못했어요. 관리자에게 보안 규칙이 최신인지 확인을 요청해 주세요.</div>`:`
+        <div class="sub" style="margin-bottom:12px">응답 <b>${s.responded}/${members.length}명</b> · 최다 가능일 <b>${topText(s)}</b><br>칸의 숫자는 그날 가능한 인원이에요 (이름 비공개)</div>
+        <div id="heat"></div>
+        <div class="legend mt"><span>적음</span><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i><span>많음 · ★ 최다</span></div>`}
+    </div>`;
+    if(!respErr&&s.dates.length){
+      mountCalendar(document.getElementById("heat"),{
+        months:monthsBetween(s.dates[0],s.dates[s.dates.length-1]),isEnabled:d=>cand.has(d),
+        heat:s.heat,total:Math.max(s.rows.length,1),best:s.best
+      });
+    }
   };
 
   handlers={
@@ -540,22 +591,37 @@ function renderRound(id){
         else toast("등록하지 못했어요. 이미 다른 사람이 등록했을 수 있어요.");
       }
     },
-    all:()=>{datesOf(round).forEach(d=>sel.add(d));dirty=true;draw()},
-    none:()=>{sel.clear();dirty=true;draw()},
+    all:()=>{datesOf(round).forEach(d=>sel.add(d));dirty=true;drawMine()},
+    none:()=>{sel.clear();dirty=true;drawMine()},
     save:async()=>{
-      try{await userApi.saveResponse(id,ident.me,{date:[...sel].sort()});dirty=false;toast("저장했어요");draw()}
+      try{await userApi.saveResponse(id,ident.me,{date:[...sel].sort()});dirty=false;toast("저장했어요");drawMine()}
       catch(e){toast("저장하지 못했어요. 마감됐거나 본인 확인이 초기화됐을 수 있어요.")}
+    },
+    refresh:()=>{
+      if(dirty&&!confirm("저장하지 않은 변경이 있어요. 새로고침하면 사라져요. 계속할까요?"))return;
+      location.reload();
     }
   };
 
-  const onIdent=()=>{syncMine();draw()};
+  const onIdent=()=>{
+    const name=ident.me||null;
+    if(name!==mineName){mineName=name;resetSel()}
+    draw();
+  };
   ident.subs.add(onIdent);
   unsubs.push(
-    ()=>{ident.subs.delete(onIdent);unsubMine?.()},
-    userApi.watchRound(id,r=>{round=r;loaded=true;draw()}),
-    userApi.watchMembers(m=>{members=m;draw()})
+    ()=>ident.subs.delete(onIdent),
+    userApi.watchRound(id,r=>{round=r;loaded=true;touch();draw()}),
+    userApi.watchMembers(m=>{members=m;touch();draw()}),
+    userApi.watchResponses(id,r=>{
+      responses=r;respErr=false;touch();
+      if(!document.getElementById("status")){if(!dirty)resetSel();draw();return}
+      // 내가 편집 중이면 내 캘린더는 그대로 두고 현황만 갱신
+      if(!dirty){resetSel();drawMine()}
+      drawStatus();
+    },()=>{responses={};respErr=true;draw()})
   );
-  syncMine();
+  onIdent();
 }
 
 // ── 관리자: 로그인 ────────────────────────────
@@ -685,7 +751,8 @@ function renderAdminNew(){
 
 // ── 관리자: 결과 ──────────────────────────────
 function renderAdminRound(id){
-  let round,loaded=false,members=[],responses={},picked=null;
+  let round,loaded=false,members=[],responses={},picked=null,lastSync=null;
+  const touch=()=>{lastSync=Date.now()};
 
   const drawPick=()=>{
     const el=document.getElementById("pick");if(!el)return;
@@ -700,25 +767,7 @@ function renderAdminRound(id){
   const draw=()=>{
     if(!loaded)return;
     if(!round){$view.innerHTML=`<div class="card">회차를 찾을 수 없어요. <a href="#/admin">회차 목록으로</a></div>`;return}
-    const dates=datesOf(round),cand=new Set(dates);
-    const rows=[...members,...Object.keys(responses).filter(n=>!members.includes(n))];
-    const heat={};dates.forEach(d=>heat[d]=0);
-    Object.values(responses).forEach(r=>(r.picks?.date||[]).forEach(d=>{if(d in heat)heat[d]++}));
-    const max=Math.max(0,...Object.values(heat));
-    const best=new Set(max>0?dates.filter(d=>heat[d]===max):[]);
-    const top=dates.filter(d=>heat[d]>0).sort((a,b)=>heat[b]-heat[a]||a.localeCompare(b)).slice(0,3);
-    const responded=members.filter(m=>responses[m]).length;
-    const pending=members.filter(m=>!responses[m]);
-    const open=round.status==="open";
-
-    const headRow=dates.map(d=>{const w=parseYmd(d).getDay();
-      return `<th class="${w===0?"sun":w===6?"sat":""} ${best.has(d)?"best":""}">${fmtDate(d).split(" ")[0]}<div class="dow">${W[w]}</div></th>`}).join("");
-    const body=rows.map(n=>{const r=responses[n],p=new Set(r?.picks?.date||[]);
-      return `<tr class="${r?"":"pending"}"><td class="nm">${esc(n)}${r?"":` <span class="sub">미응답</span>`}</td>
-        ${dates.map(d=>`<td class="${p.has(d)?"y":""}">${p.has(d)?"●":""}</td>`).join("")}
-        <td>${r?p.size:"-"}</td></tr>`}).join("");
-    const foot=`<tr class="foot"><td class="nm">가능 인원</td>${dates.map(d=>`<td class="tot ${best.has(d)?"best":""}">${heat[d]}</td>`).join("")}<td></td></tr>`;
-
+    const s=summarize(round,members,responses),cand=new Set(s.dates),open=round.status==="open";
     $view.innerHTML=`
       <div class="card">
         <div class="row between">
@@ -731,14 +780,18 @@ function renderAdminRound(id){
         </div>
       </div>
       <div class="card">
+        <div class="row between" style="margin-bottom:12px">
+          <h3 style="margin:0">요약</h3>
+          <div class="row"><span class="sub">${syncText(lastSync)}</span><button class="btn sm" data-act="refresh">↻ 새로고침</button></div>
+        </div>
         <div class="stats">
-          <div class="stat"><div class="sub">응답</div><div class="big">${responded} / ${members.length}명</div></div>
+          <div class="stat"><div class="sub">응답</div><div class="big">${s.responded} / ${members.length}명</div></div>
           <div class="stat"><div class="sub">최다 가능일</div>
-            <div class="big">${top.length?`${fmtDate(top[0])} · ${heat[top[0]]}명`:"-"}</div>
-            ${top.length>1?`<div class="sub">${top.slice(1).map(d=>`${fmtDate(d)} ${heat[d]}명`).join(" / ")}</div>`:""}
+            <div class="big">${topText(s)}</div>
+            ${s.top.length>1?`<div class="sub">${s.top.slice(1).map(d=>`${fmtDate(d)} ${s.heat[d]}명`).join(" / ")}</div>`:""}
           </div>
         </div>
-        <div class="sub mt">미응답: ${esc(pending.join(", "))||"없음 🎉"}</div>
+        <div class="sub mt">미응답: ${esc(s.pending.join(", "))||"없음 🎉"}</div>
       </div>
       <div class="card">
         <div class="row between" style="margin-bottom:10px">
@@ -749,16 +802,11 @@ function renderAdminRound(id){
         <div id="cal"></div>
         <div class="pick" id="pick"></div>
       </div>
-      <div class="card">
-        <h3>응답표</h3>
-        ${dates.length?`<div class="mx-wrap"><table class="mx">
-          <thead><tr><th class="nm">이름</th>${headRow}<th>계</th></tr></thead>
-          <tbody>${body}${foot}</tbody></table></div>`:`<span class="muted">후보 날짜가 없어요.</span>`}
-      </div>`;
-    if(dates.length){
+      <div class="card"><h3>응답표</h3>${matrixHtml(s,responses,null)}</div>`;
+    if(s.dates.length){
       mountCalendar(document.getElementById("cal"),{
-        months:monthsBetween(dates[0],dates[dates.length-1]),isEnabled:d=>cand.has(d),
-        heat,total:Math.max(rows.length,1),best,onPick:d=>{picked=d;drawPick()}
+        months:monthsBetween(s.dates[0],s.dates[s.dates.length-1]),isEnabled:d=>cand.has(d),
+        heat:s.heat,total:Math.max(s.rows.length,1),best:s.best,onPick:d=>{picked=d;drawPick()}
       });
       if(picked)document.querySelector(`.cell[data-d="${picked}"]`)?.classList.add("picked");
     }
@@ -768,12 +816,13 @@ function renderAdminRound(id){
   handlers={
     copyLink:()=>copy(roundUrl(id)),
     copyMail:()=>copy(mailText(round)),
-    toggleStatus:()=>adminApi.updateRound(id,{status:round.status==="open"?"closed":"open"})
+    toggleStatus:()=>adminApi.updateRound(id,{status:round.status==="open"?"closed":"open"}),
+    refresh:()=>location.reload()
   };
   unsubs.push(
-    adminApi.watchRound(id,r=>{round=r;loaded=true;draw()}),
-    adminApi.watchMembers(m=>{members=m;draw()}),
-    adminApi.watchResponses(id,r=>{responses=r;draw()})
+    adminApi.watchRound(id,r=>{round=r;loaded=true;touch();draw()}),
+    adminApi.watchMembers(m=>{members=m;touch();draw()}),
+    adminApi.watchResponses(id,r=>{responses=r;touch();draw()})
   );
 }
 
