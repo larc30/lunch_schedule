@@ -69,8 +69,12 @@
   .chips{display:flex;flex-wrap:wrap;gap:8px}
   .chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 14px;cursor:pointer;font-size:14px;font-family:inherit;color:var(--text)}
   .chip:hover{border-color:var(--accent)}
-  .chip.taken{cursor:not-allowed;color:var(--faint);background:#f3f4f6}
-  .chip.taken:hover{border-color:var(--line)}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .chip .lock{font-size:11px;margin-left:2px}
+  .pinbox{margin-top:16px;padding:14px 16px;background:#f8f9fb;border:1px solid var(--line);border-radius:10px}
+  .pin-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 6px}
+  .pin-row input[type=password]{width:150px;letter-spacing:.25em}
+  .me .linkbtn{font-weight:400;color:var(--sub);margin-left:6px}
   .badge{display:inline-block;font-size:12px;border-radius:999px;padding:1px 8px;margin-left:6px;vertical-align:middle;font-weight:500}
   .badge.open{background:var(--good-soft);color:var(--good)}
   .badge.closed{background:#eef0f3;color:var(--sub)}
@@ -176,9 +180,9 @@ const DEMO = new URLSearchParams(location.search).has("demo") || !firebaseConfig
 const $view = document.getElementById("view");
 let userApi, adminApi, unsubs = [], handlers = {};
 let adminUser = null, adminReady = false;
-// 일반 사용자 신원: 이 브라우저의 익명 계정(uid) + 이름 귀속 목록(claims) → 내 이름(me)
-const ident = {uid:undefined, claims:null, me:null, sig:"", subs:new Set(),
-  get ready(){return this.uid!==undefined&&this.claims!==null}};
+// 일반 사용자 신원: 로그인한 PIN 계정(uid) + 이름별 PIN 계정 목록(accounts) → 내 이름(me)
+const ident = {uid:undefined, accounts:null, me:null, sig:"", subs:new Set(),
+  get ready(){return this.uid!==undefined&&this.accounts!==null}};
 
 // ── 유틸 ──────────────────────────────────────
 const W = "일월화수목금토";
@@ -209,7 +213,7 @@ function datesOf(r){return (r?.items?.date||[]).slice().sort()}
 function dateSummary(r){const ds=datesOf(r);return ds.length?`${fmtDate(ds[0])} ~ ${fmtDate(ds[ds.length-1])} · 후보 ${ds.length}일`:"후보 없음"}
 function badge(r){return `<span class="badge ${r.status}">${r.status==="open"?"진행중":"마감"}</span>`}
 function mailText(r){
-  return `[팀점심] ${r.title} 가능 날짜 체크 부탁드립니다.\n\n아래 링크에서 처음 한 번 본인 이름을 고른 뒤, 캘린더에서 가능한 날짜를 모두 눌러 저장해 주세요.\n${roundUrl(r.id)}\n\n후보 기간: ${dateSummary(r)}`;
+  return `[팀점심] ${r.title} 가능 날짜 체크 부탁드립니다.\n\n아래 링크에서 본인 이름을 고르고 PIN 6자리를 입력한 뒤(처음이면 PIN을 새로 정해요), 캘린더에서 가능한 날짜를 모두 눌러 저장해 주세요.\n${roundUrl(r.id)}\n\n후보 기간: ${dateSummary(r)}`;
 }
 function showError(msg){document.getElementById("banner").innerHTML=`<div class="banner err">${esc(msg)}</div>`}
 function fmtTime(ts){const d=new Date(ts);return [d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,"0")).join(":")}
@@ -355,20 +359,31 @@ function firebaseData(fs,db){
       await Promise.all(rs.docs.map(d=>deleteDoc(d.ref)));
       await deleteDoc(doc(db,"rounds",id));
     },
-    // 서버에 확정된 귀속만 반영(쓰기 대기 중인 건 제외)
-    watchClaims(cb){return onSnapshot(collection(db,"claims"),{includeMetadataChanges:true},
+    // 이름별 PIN 계정 (서버에 확정된 것만 반영)
+    watchAccounts(cb){return onSnapshot(collection(db,"accounts"),{includeMetadataChanges:true},
       s=>{const o={};s.docs.forEach(d=>{if(!d.metadata.hasPendingWrites)o[d.id]=d.data()});cb(o)},onErr)},
-    resetClaim(name){return deleteDoc(doc(db,"claims",name))},
+    resetAccount(name){return deleteDoc(doc(db,"accounts",name))},
     watchResponses(id,cb,onError){return onSnapshot(collection(db,"rounds",id,"responses"),s=>{const o={};s.docs.forEach(d=>o[d.id]=d.data());cb(o)},e=>{onErr(e);onError?.(e)})}
   };
 }
+// 팀원 PIN 로그인: 이름마다 내부용 계정(가상 이메일 + PIN)을 자동으로 만들어 씀 — 팀원은 이름과 PIN만 알면 됨
+function rid(){return Array.from(crypto.getRandomValues(new Uint8Array(6)),b=>b.toString(16).padStart(2,"0")).join("")}
 function firebaseUserApi(app,fs,au){
   const db=fs.getFirestore(app),auth=au.getAuth(app);
-  const ensure=async()=>auth.currentUser||(await au.signInAnonymously(auth)).user;
   return {...firebaseData(fs,db),
     onUser(cb){return au.onAuthStateChanged(auth,cb)},
-    async claim(name){const u=await ensure();await fs.setDoc(fs.doc(db,"claims",name),{name,uid:u.uid,claimedAt:Date.now()})},
-    async saveResponse(id,name,picks){const u=await ensure();await fs.setDoc(fs.doc(db,"rounds",id,"responses",name),{name,uid:u.uid,picks,updatedAt:Date.now()})}
+    async register(name,pin){
+      const email=`pin-${rid()}@lunch.example.com`;
+      const {user}=await au.createUserWithEmailAndPassword(auth,email,pin);
+      try{await fs.setDoc(fs.doc(db,"accounts",name),{name,uid:user.uid,email,createdAt:Date.now()})}
+      catch(e){try{await au.deleteUser(user)}catch{};await au.signOut(auth).catch(()=>{});throw e}
+    },
+    async login(email,pin){await au.signInWithEmailAndPassword(auth,email,pin)},
+    logout(){return au.signOut(auth)},
+    async saveResponse(id,name,picks){
+      const u=auth.currentUser;if(!u)throw new Error("로그인이 필요해요");
+      await fs.setDoc(fs.doc(db,"rounds",id,"responses",name),{name,uid:u.uid,picks,updatedAt:Date.now()});
+    }
   };
 }
 function firebaseAdminApi(app,fs,au){
@@ -382,8 +397,8 @@ function firebaseAdminApi(app,fs,au){
 
 // ── 데이터 계층: 데모(localStorage) ───────────
 function localApis(){
-  const KEY="lunchpoll-demo3";
-  const empty=()=>({members:[],rounds:{},responses:{},claims:{}});
+  const KEY="lunchpoll-demo4";
+  const empty=()=>({members:[],rounds:{},responses:{},accounts:{}});
   const load=()=>{try{return {...empty(),...JSON.parse(localStorage.getItem(KEY))}}catch{return empty()}};
   let state=load();
   const subs=new Set(),notify=()=>subs.forEach(f=>f());
@@ -398,18 +413,25 @@ function localApis(){
     async createRound(d){const id=Math.random().toString(36).slice(2,10);state.rounds[id]={...d,createdAt:Date.now()};save();return id},
     async updateRound(id,p){Object.assign(state.rounds[id],p);save()},
     async deleteRound(id){delete state.rounds[id];delete state.responses[id];save()},
-    watchClaims(cb){return sub(()=>cb(clone(state.claims)))},
-    async resetClaim(n){delete state.claims[n];save()},
+    watchAccounts(cb){return sub(()=>cb(clone(state.accounts)))},
+    async resetAccount(n){delete state.accounts[n];save()},
     watchResponses(id,cb){return sub(()=>cb(clone(state.responses[id]||{})))}
   };
   const UK="lunchpoll-demo-uid";let uid=lsGet(UK);const uSubs=new Set();
-  const emitU=()=>uSubs.forEach(f=>f(uid?{uid}:null));
-  const ensure=()=>{if(!uid){uid="demo-"+Math.random().toString(36).slice(2,10);lsSet(UK,uid);emitU()}return uid};
+  const setUid=v=>{uid=v;try{v?localStorage.setItem(UK,v):localStorage.removeItem(UK)}catch{};uSubs.forEach(f=>f(uid?{uid}:null))};
+  const err=c=>Object.assign(new Error(c),{code:c});
   const user={...data,
     onUser(cb){uSubs.add(cb);setTimeout(()=>cb(uid?{uid}:null));return()=>uSubs.delete(cb)},
-    async claim(name){const u=ensure();if(state.claims[name])throw new Error("taken");state.claims[name]={name,uid:u,claimedAt:Date.now()};save()},
-    async saveResponse(id,name,picks){const u=ensure();(state.responses[id]||={})[name]={name,uid:u,picks,updatedAt:Date.now()};save()},
-    resetIdentity(){uid=null;try{localStorage.removeItem(UK)}catch{};emitU()}
+    async register(name,pin){
+      if(state.accounts[name])throw err("permission-denied");
+      const u="demo-"+rid();state.accounts[name]={name,uid:u,email:`pin-${rid()}@demo`,createdAt:Date.now(),_pin:pin};save();setUid(u);
+    },
+    async login(email,pin){
+      const a=Object.values(state.accounts).find(x=>x.email===email);
+      if(!a||a._pin!==pin)throw err("auth/invalid-credential");setUid(a.uid);
+    },
+    async logout(){setUid(null)},
+    async saveResponse(id,name,picks){if(!uid)throw err("unauthenticated");(state.responses[id]||={})[name]={name,uid,picks,updatedAt:Date.now()};save()}
   };
   let adm=false;try{adm=sessionStorage.getItem("lunchpoll-demo-admin")==="1"}catch{}
   const aSubs=new Set();
@@ -424,10 +446,10 @@ function localApis(){
 
 // ── 신원(일반 사용자) ─────────────────────────
 function identChanged(){
-  const sig=JSON.stringify([ident.uid,ident.claims]);
+  const sig=JSON.stringify([ident.uid===undefined?"(pending)":ident.uid,ident.accounts]); // undefined와 null(로그아웃)을 구분
   if(sig===ident.sig)return;
   ident.sig=sig;
-  const c=ident.claims,u=ident.uid;
+  const c=ident.accounts,u=ident.uid;
   ident.me=c&&u?(Object.values(c).find(x=>x.uid===u)?.name??null):null;
   drawHeader();
   ident.subs.forEach(f=>f());
@@ -454,8 +476,10 @@ function drawHeader(){
   }else{
     hd.innerHTML=`<div class="bar1"><div class="wrap">
       <a class="brand" href="#/">🍱 팀 점심 일정</a>
-      ${ident.me?`<span class="me">👤 ${esc(ident.me)}님</span>`:""}
+      ${ident.me?`<span class="me">👤 ${esc(ident.me)}님<button class="linkbtn" id="ulogout">로그아웃</button></span>`:""}
     </div></div>`;
+    const ul=document.getElementById("ulogout");
+    if(ul)ul.onclick=async()=>{await userApi.logout();toast("로그아웃했어요")};
   }
   document.getElementById("ft").innerHTML=onAdmin?"":`<a href="#/admin">${adminUser?"관리자 화면으로 →":"🔒 관리자 로그인"}</a>`;
 }
@@ -492,6 +516,7 @@ function renderHome(){
 function renderRound(id){
   let round,loaded=false,members=null,responses=null,respErr=false,lastSync=null;
   let sel=new Set(),dirty=false,mineName=null;
+  let pinFor=null,pv1="",pv2="",pinErr="",busy=false,focusPin=false;
 
   const saved=()=>(mineName&&responses)?(responses[mineName]||null):null;
   const resetSel=()=>{sel=new Set(saved()?.picks?.date||[]);dirty=false};
@@ -517,18 +542,36 @@ function renderRound(id){
   // 내 영역: 이름 선택 또는 내 캘린더
   const drawMine=()=>{
     const el=document.getElementById("mine");if(!el)return;
-    const me=ident.me,claims=ident.claims,open=round.status==="open",dates=datesOf(round),cand=new Set(dates);
+    const me=ident.me,acc=ident.accounts,open=round.status==="open",dates=datesOf(round),cand=new Set(dates);
     if(!me){
-      const avail=members.filter(m=>!claims[m]);
+      if(pinFor&&!members.includes(pinFor))pinFor=null;
+      const isNew=pinFor&&!acc[pinFor],focused=document.activeElement?.id;
       el.innerHTML=`<div class="card">
-        <h3>본인 이름 선택</h3>
-        <div class="sub" style="margin-bottom:12px">처음 한 번만 고르면 이 브라우저에서 본인으로 인식돼요. 응답 수정은 본인만 할 수 있어요.</div>
-        ${members.length?`<div class="chips">${members.map(m=>claims[m]
-            ?`<span class="chip taken" title="이미 등록된 이름">${esc(m)} · 등록됨</span>`
-            :`<button class="chip" data-act="claim" data-v="${esc(m)}">${esc(m)}</button>`).join("")}</div>`
+        <h3>본인 확인</h3>
+        <div class="sub" style="margin-bottom:12px">이름을 고르고 PIN 6자리를 입력하세요. 처음이면 PIN을 새로 정해요. 🔒 표시는 PIN이 등록된 이름이에요.</div>
+        ${members.length?`<div class="chips">${members.map(m=>
+            `<button class="chip ${m===pinFor?"on":""}" data-act="pick" data-v="${esc(m)}">${esc(m)}${acc[m]?`<span class="lock">🔒</span>`:""}</button>`).join("")}</div>`
           :`<span class="muted">팀원이 아직 등록되지 않았어요.</span>`}
-        ${members.length&&!avail.length?`<div class="sub mt">모든 이름이 등록돼 있어요. 본인 이름이 이미 등록돼 있다면 관리자에게 초기화를 요청하세요.</div>`:""}
+        ${pinFor?`<div class="pinbox">
+          <div>${isNew?`<b>${esc(pinFor)}</b>님, 처음이시네요. 앞으로 쓸 PIN 6자리를 정해 주세요.`:`<b>${esc(pinFor)}</b>님의 PIN 6자리를 입력하세요.`}</div>
+          <div class="pin-row">
+            <input type="password" id="pin1" inputmode="numeric" maxlength="6" autocomplete="${isNew?"new-password":"current-password"}" placeholder="PIN 6자리">
+            ${isNew?`<input type="password" id="pin2" inputmode="numeric" maxlength="6" autocomplete="new-password" placeholder="PIN 다시 입력">`:""}
+            <button class="btn primary" data-act="pinGo" ${busy?"disabled":""}>${busy?"확인 중…":isNew?"등록":"확인"}</button>
+          </div>
+          <div class="sub">${pinErr?`<span style="color:var(--danger)">${esc(pinErr)}</span>`
+            :isNew?"숫자 6자리 · 다른 사이트 비밀번호와 다르게 정하세요":"PIN을 잊었으면 관리자에게 초기화를 요청하세요"}</div>
+        </div>`:""}
       </div>`;
+      const p1=document.getElementById("pin1"),p2=document.getElementById("pin2");
+      if(p1){
+        p1.value=pv1;p1.oninput=()=>{pv1=p1.value};
+        if(p2){p2.value=pv2;p2.oninput=()=>{pv2=p2.value}}
+        [p1,p2].forEach(x=>x&&x.addEventListener("keydown",e=>{if(e.key==="Enter")handlers.pinGo()}));
+        const f=focusPin?p1:document.getElementById(focused);
+        if(f&&(f===p1||f===p2))f.focus();
+        focusPin=false;
+      }
       return;
     }
     el.innerHTML=`<div class="card">
@@ -539,7 +582,7 @@ function renderRound(id){
           <button class="btn sm" data-act="none" ${open?"":"disabled"}>선택 지우기</button>
         </div>
       </div>
-      <div class="sub">👤 <b>${esc(me)}</b>님으로 응답 중 · 본인이 아니면 관리자에게 초기화를 요청하세요</div>
+      <div class="sub">👤 <b>${esc(me)}</b>님으로 응답 중 · 본인이 아니면 오른쪽 위 로그아웃</div>
       <div class="sub" style="margin:4px 0 12px">${open?"칸을 누르면 선택/해제돼요. PC에서는 드래그로 여러 날을 한 번에 칠할 수 있어요. 회색 칸은 후보가 아닌 날이에요."
         :"마감된 회차라 수정할 수 없어요."}</div>
       <div id="cal"></div>
@@ -581,21 +624,33 @@ function renderRound(id){
   };
 
   handlers={
-    claim:async el=>{
-      const name=el.dataset.v;
-      if(!confirm(`'${name}'(으)로 등록할까요?\n\n이 브라우저에서 본인으로 인식되고, 이후 이름 변경은 관리자만 할 수 있어요.`))return;
-      try{await userApi.claim(name);toast(`${name}님으로 등록했어요`)}
-      catch(e){
-        if(/operation-not-allowed|admin-restricted/.test(e.code||""))
-          showError("Firebase에서 익명 로그인이 꺼져 있어 등록할 수 없어요. 관리자에게 알려주세요.");
-        else toast("등록하지 못했어요. 이미 다른 사람이 등록했을 수 있어요.");
-      }
+    pick:el=>{if(busy)return;pinFor=el.dataset.v;pv1=pv2=pinErr="";focusPin=true;drawMine()},
+    pinGo:async()=>{
+      if(busy||!pinFor)return;
+      const name=pinFor,a=ident.accounts[name],p1=pv1.trim(),p2=pv2.trim();
+      if(!/^\d{6}$/.test(p1)){pinErr="PIN은 숫자 6자리예요";focusPin=true;return drawMine()}
+      if(!a&&p1!==p2){pinErr="두 PIN이 서로 달라요";pv2="";return drawMine()}
+      busy=true;pinErr="";drawMine();
+      try{
+        if(a)await userApi.login(a.email,p1);else await userApi.register(name,p1);
+        pinFor=null;pv1=pv2="";
+        toast(a?`${name}님 확인됐어요`:`${name}님 PIN을 등록했어요`);
+      }catch(e){
+        const c=e.code||"";
+        pinErr=/wrong-password|invalid-credential|user-not-found|invalid-login/.test(c)?"PIN이 맞지 않아요"
+          :/too-many-requests/.test(c)?"틀린 시도가 많아 잠시 막혔어요. 몇 분 뒤 다시 해 주세요"
+          :/operation-not-allowed/.test(c)?"Firebase에서 이메일/비밀번호 로그인이 꺼져 있어요. 관리자에게 알려주세요"
+          :/permission-denied/.test(c)?"등록하지 못했어요. 방금 다른 사람이 이 이름을 등록했을 수 있어요"
+          :/network/.test(c)?"네트워크 오류예요. 잠시 뒤 다시 해 주세요"
+          :`확인하지 못했어요 (${c||e.message})`;
+        pv1=pv2="";focusPin=true;
+      }finally{busy=false;if(!ident.me)drawMine()}
     },
     all:()=>{datesOf(round).forEach(d=>sel.add(d));dirty=true;drawMine()},
     none:()=>{sel.clear();dirty=true;drawMine()},
     save:async()=>{
       try{await userApi.saveResponse(id,ident.me,{date:[...sel].sort()});dirty=false;toast("저장했어요");drawMine()}
-      catch(e){toast("저장하지 못했어요. 마감됐거나 본인 확인이 초기화됐을 수 있어요.")}
+      catch(e){toast("저장하지 못했어요. 마감됐거나 PIN이 초기화됐을 수 있어요. 다시 로그인해 주세요.")}
     },
     refresh:()=>{
       if(dirty&&!confirm("저장하지 않은 변경이 있어요. 새로고침하면 사라져요. 계속할까요?"))return;
@@ -617,7 +672,7 @@ function renderRound(id){
       responses=r;respErr=false;touch();
       if(!document.getElementById("status")){if(!dirty)resetSel();draw();return}
       // 내가 편집 중이면 내 캘린더는 그대로 두고 현황만 갱신
-      if(!dirty){resetSel();drawMine()}
+      if(!dirty&&ident.me){resetSel();drawMine()}
       drawStatus();
     },()=>{responses={};respErr=true;draw()})
   );
@@ -828,7 +883,7 @@ function renderAdminRound(id){
 
 // ── 관리자: 팀원 + 본인 확인 현황 ─────────────
 function renderAdminMembers(){
-  let members=[],claims={},dirty=false;
+  let members=[],accounts={},dirty=false;
   $view.innerHTML=`
     <div class="card"><h2>팀원</h2><div class="sub">응답할 수 있는 이름과 본인 확인 현황을 관리해요.</div></div>
     <div class="card">
@@ -838,8 +893,8 @@ function renderAdminMembers(){
       <div class="row mt"><button class="btn primary" data-act="saveMembers">팀원 저장</button><span class="sub" id="memberCount"></span></div>
     </div>
     <div class="card">
-      <h3>본인 확인 현황</h3>
-      <div class="sub" style="margin-bottom:14px">팀원이 처음 이름을 고른 브라우저가 본인으로 인식돼요. PC를 바꿨거나 잘못 등록됐으면 초기화하세요. 기존 응답은 유지돼요.</div>
+      <h3>PIN 등록 현황</h3>
+      <div class="sub" style="margin-bottom:14px">팀원은 이름 + PIN 6자리로 본인 확인을 해요. PIN을 잊었거나 다른 사람이 잘못 등록했으면 초기화하세요. 기존 응답은 유지되고, 다음 접속 때 PIN을 새로 정해요.</div>
       <div id="claimList"></div>
     </div>`;
   const ta=document.getElementById("membersTa");
@@ -849,12 +904,12 @@ function renderAdminMembers(){
     document.getElementById("memberCount").textContent=`현재 ${members.length}명`;
   };
   const drawClaims=()=>{
-    const names=[...members,...Object.keys(claims).filter(n=>!members.includes(n))];
-    document.getElementById("claimList").innerHTML=names.length?names.map(n=>{const c=claims[n];
+    const names=[...members,...Object.keys(accounts).filter(n=>!members.includes(n))];
+    document.getElementById("claimList").innerHTML=names.length?names.map(n=>{const c=accounts[n];
       return `<div class="ritem">
         <div><b>${esc(n)}</b>${members.includes(n)?"":` <span class="sub">(팀원 목록에 없음)</span>`}
-          <div class="sub">${c?`<span class="ok">● 등록됨</span> · ${fmtDT(c.claimedAt)}`:"○ 아직 이름을 고르지 않음"}</div></div>
-        ${c?`<button class="btn sm danger" data-act="reset" data-v="${esc(n)}">초기화</button>`:""}
+          <div class="sub">${c?`<span class="ok">● PIN 등록됨</span> · ${fmtDT(c.createdAt)}`:"○ 아직 PIN 미등록"}</div></div>
+        ${c?`<button class="btn sm danger" data-act="reset" data-v="${esc(n)}">PIN 초기화</button>`:""}
       </div>`}).join(""):`<span class="muted">팀원을 먼저 등록하세요.</span>`;
   };
   handlers={
@@ -865,13 +920,13 @@ function renderAdminMembers(){
     },
     reset:async el=>{
       const n=el.dataset.v;
-      if(!confirm(`'${n}'의 본인 확인을 초기화할까요?\n\n기존 응답은 유지되고, 다음에 이 이름을 고르는 브라우저가 본인으로 인식돼요.`))return;
-      try{await adminApi.resetClaim(n);toast("초기화했어요")}catch(e){toast("초기화 실패: "+e.message)}
+      if(!confirm(`'${n}'의 PIN을 초기화할까요?\n\n기존 응답은 유지되고, 다음 접속 때 PIN을 새로 정해요.`))return;
+      try{await adminApi.resetAccount(n);toast("초기화했어요")}catch(e){toast("초기화 실패: "+e.message)}
     }
   };
   unsubs.push(
     adminApi.watchMembers(m=>{members=m;drawMembers();drawClaims()}),
-    adminApi.watchClaims(c=>{claims=c;drawClaims()})
+    adminApi.watchAccounts(c=>{accounts=c;drawClaims()})
   );
 }
 
@@ -880,8 +935,8 @@ function renderAdminMembers(){
   try{
     if(DEMO){
       const l=localApis();userApi=l.user;adminApi=l.admin;
-      document.getElementById("banner").innerHTML=`<div class="banner">데모 모드: 데이터가 이 브라우저에만 저장돼요. <button class="linkbtn" id="demoSwitch">다른 사람으로 테스트</button></div>`;
-      document.getElementById("demoSwitch").onclick=()=>{userApi.resetIdentity();toast("새 사람으로 전환했어요")};
+      document.getElementById("banner").innerHTML=`<div class="banner">데모 모드: 데이터가 이 브라우저에만 저장돼요. <button class="linkbtn" id="demoSwitch">로그아웃(다른 사람으로 테스트)</button></div>`;
+      document.getElementById("demoSwitch").onclick=()=>{userApi.logout();toast("로그아웃했어요")};
     }else{
       const V="10.12.2",B=`https://www.gstatic.com/firebasejs/${V}`;
       const [{initializeApp},fs,au]=await Promise.all([import(`${B}/firebase-app.js`),import(`${B}/firebase-firestore.js`),import(`${B}/firebase-auth.js`)]);
@@ -889,7 +944,7 @@ function renderAdminMembers(){
       adminApi=firebaseAdminApi(initializeApp(firebaseConfig,"admin"),fs,au);
     }
     userApi.onUser(u=>{ident.uid=u?u.uid:null;identChanged()});
-    userApi.watchClaims(c=>{ident.claims=c;identChanged()});
+    userApi.watchAccounts(c=>{ident.accounts=c;identChanged()});
     adminApi.onAuth(u=>{
       adminUser=u;adminReady=true;
       if((location.hash||"").startsWith("#/admin"))route();else drawHeader();
