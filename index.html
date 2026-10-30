@@ -46,6 +46,7 @@
   footer a{color:var(--faint);text-decoration:none}
   footer a:hover{color:var(--sub);text-decoration:underline}
   @media (max-width:480px){ .acct .email{display:none} .brand{font-size:15px} }
+  @media (max-width:480px){ .pin-row>input,.pin-row>#pin2wrap,.pin-row>#pin2wrap input,.pin-row>.btn{width:100%!important} }
 
   main.wrap{padding-top:20px;padding-bottom:32px}
   .banner{background:var(--warn-soft);color:var(--warn);border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
@@ -217,7 +218,7 @@ function datesOf(r){return (r?.items?.date||[]).slice().sort()}
 function dateSummary(r){const ds=datesOf(r);return ds.length?`${fmtDate(ds[0])} ~ ${fmtDate(ds[ds.length-1])} · 후보 ${ds.length}일`:"후보 없음"}
 function badge(r){return `<span class="badge ${r.status}">${r.status==="open"?"진행중":"마감"}</span>`}
 function mailText(r){
-  return `[팀점심] ${r.title} 가능 날짜 체크 부탁드립니다.\n\n아래 링크에서 본인 이름을 고르고 PIN 6자리를 입력한 뒤(처음이면 PIN을 새로 정해요), 캘린더에서 가능한 날짜를 모두 눌러 저장해 주세요.\n${roundUrl(r.id)}\n\n후보 기간: ${dateSummary(r)}`;
+  return `[팀점심] ${r.title} 가능 날짜 체크 부탁드립니다.\n\n아래 링크에서 본인 이름과 PIN 6자리를 입력한 뒤(처음이면 PIN을 새로 정해요), 캘린더에서 가능한 날짜를 모두 눌러 저장해 주세요.\n${roundUrl(r.id)}\n\n후보 기간: ${dateSummary(r)}`;
 }
 function showError(msg){document.getElementById("banner").innerHTML=`<div class="banner err">${esc(msg)}</div>`}
 function fmtTime(ts){const d=new Date(ts);return [d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,"0")).join(":")}
@@ -548,68 +549,76 @@ $view.addEventListener("click",e=>{
   if(t&&handlers[t.dataset.act]){e.preventDefault();handlers[t.dataset.act](t)}
 });
 
-// ── PIN 로그인 카드 (첫 화면·회차 화면 공용) ───
-// o.names: 고를 수 있는 이름, o.st: 상태(다시 그려도 유지), o.title, o.desc, o.emptyText
-function newPinState(){return {pinFor:null,pv1:"",pv2:"",err:"",busy:false,focus:false}}
+// ── 로그인 카드: 이름 직접 입력 + PIN (첫 화면·회차 화면 공용) ───
+// o.names: 전체 명단, o.st: 상태(다시 그려도 유지), o.title, o.desc
+function newPinState(){return {name:"",pv1:"",pv2:"",err:"",busy:false,focus:null,last:null}}
+const normName=s=>String(s||"").replace(/\s+/g,"").toUpperCase(); // 공백·대소문자 무시
+function findName(input,names){const k=normName(input);return k?names.find(n=>normName(n)===k)||null:null}
 function mountPinLogin(el,o){
   const st=o.st;
+  const isNewName=()=>{const n=findName(st.name,o.names);return !!n&&!ident.accounts?.[n]};
+  // 이름 입력 중에는 전체를 다시 그리지 않고 'PIN 확인' 칸만 켜고 끔
+  const syncNew=()=>{
+    const nw=isNewName();
+    const w=el.querySelector("#pin2wrap"),h=el.querySelector("#pinHint"),b=el.querySelector("[data-pin=go]");
+    if(w)w.style.display=nw?"":"none";
+    if(b&&!st.busy)b.textContent=nw?"PIN 등록":"로그인";
+    if(h&&!st.err)h.innerHTML=nw?"처음이시네요. 앞으로 쓸 PIN 6자리를 정해 주세요 (다른 사이트 비밀번호와 다르게)."
+      :"PIN을 잊었으면 관리자에게 초기화를 요청하세요.";
+  };
   const draw=()=>{
-    const acc=ident.accounts||{};
-    if(st.pinFor&&!o.names.includes(st.pinFor))st.pinFor=null;
-    const isNew=st.pinFor&&!acc[st.pinFor],focused=document.activeElement?.id;
+    const focused=st.focus||st.last; // 다른 사람 등록 등으로 다시 그려도 입력 위치 유지
     el.innerHTML=`<div class="card">
       <h3>${esc(o.title)}</h3>
       <div class="sub" style="margin-bottom:12px">${o.desc}</div>
-      ${o.names.length?`<div class="chips">${o.names.map(m=>
-          `<button type="button" class="chip ${m===st.pinFor?"on":""}" data-pin="pick" data-v="${esc(m)}">${esc(m)}${acc[m]?`<span class="lock">🔒</span>`:""}</button>`).join("")}</div>`
-        :`<span class="muted">${esc(o.emptyText)}</span>`}
-      ${st.pinFor?`<div class="pinbox">
-        <div>${isNew?`<b>${esc(st.pinFor)}</b>님, 처음이시네요. 앞으로 쓸 PIN 6자리를 정해 주세요.`:`<b>${esc(st.pinFor)}</b>님의 PIN 6자리를 입력하세요.`}</div>
-        <div class="pin-row">
-          <input type="password" id="pin1" inputmode="numeric" maxlength="6" autocomplete="${isNew?"new-password":"current-password"}" placeholder="PIN 6자리">
-          ${isNew?`<input type="password" id="pin2" inputmode="numeric" maxlength="6" autocomplete="new-password" placeholder="PIN 다시 입력">`:""}
-          <button type="button" class="btn primary" data-pin="go" ${st.busy?"disabled":""}>${st.busy?"확인 중…":isNew?"등록":"확인"}</button>
-        </div>
-        <div class="sub">${st.err?`<span style="color:var(--danger)">${esc(st.err)}</span>`
-          :isNew?"숫자 6자리 · 다른 사이트 비밀번호와 다르게 정하세요":"PIN을 잊었으면 관리자에게 초기화를 요청하세요"}</div>
-      </div>`:""}
+      <div class="pin-row" style="margin-top:0">
+        <input type="text" id="pinName" maxlength="20" autocomplete="username" placeholder="이름" style="width:150px">
+        <input type="password" id="pin1" inputmode="numeric" maxlength="6" autocomplete="current-password" placeholder="PIN 6자리">
+        <span id="pin2wrap" style="display:none"><input type="password" id="pin2" inputmode="numeric" maxlength="6" autocomplete="new-password" placeholder="PIN 다시 입력"></span>
+        <button type="button" class="btn primary" data-pin="go" ${st.busy?"disabled":""}>${st.busy?"확인 중…":"로그인"}</button>
+      </div>
+      <div class="sub" id="pinHint">${st.err?`<span style="color:var(--danger)">${esc(st.err)}</span>`:""}</div>
     </div>`;
-    const p1=el.querySelector("#pin1"),p2=el.querySelector("#pin2");
-    if(p1){
-      p1.value=st.pv1;p1.oninput=()=>{st.pv1=p1.value};
-      if(p2){p2.value=st.pv2;p2.oninput=()=>{st.pv2=p2.value}}
-      [p1,p2].forEach(x=>x&&x.addEventListener("keydown",e=>{if(e.key==="Enter")go()}));
-      const f=st.focus?p1:document.getElementById(focused);
-      if(f&&(f===p1||f===p2))f.focus();
-      st.focus=false;
-    }
+    const nm=el.querySelector("#pinName"),p1=el.querySelector("#pin1"),p2=el.querySelector("#pin2");
+    nm.value=st.name;p1.value=st.pv1;p2.value=st.pv2;
+    nm.oninput=()=>{st.name=nm.value;if(st.err){st.err="";el.querySelector("#pinHint").innerHTML=""}syncNew()};
+    p1.oninput=()=>{st.pv1=p1.value};p2.oninput=()=>{st.pv2=p2.value};
+    [nm,p1,p2].forEach(x=>{
+      x.addEventListener("keydown",e=>{if(e.key==="Enter")go()});
+      x.addEventListener("focus",()=>{st.last=x.id});
+      x.addEventListener("blur",()=>{setTimeout(()=>{if(x.isConnected&&st.last===x.id)st.last=null})});
+    });
+    syncNew();
+    const f=focused&&el.querySelector("#"+focused);if(f&&f.offsetParent!==null)f.focus();
+    st.focus=null;
   };
+  const fail=(msg,focus)=>{st.err=msg;st.focus=focus;draw()};
   const go=async()=>{
-    if(st.busy||!st.pinFor)return;
-    const name=st.pinFor,a=ident.accounts?.[name],p1=st.pv1.trim(),p2=st.pv2.trim();
-    if(!/^\d{6}$/.test(p1)){st.err="PIN은 숫자 6자리예요";st.focus=true;return draw()}
-    if(!a&&p1!==p2){st.err="두 PIN이 서로 달라요";st.pv2="";return draw()}
+    if(st.busy)return;
+    const typed=st.name.trim(),p1=st.pv1.trim(),p2=st.pv2.trim();
+    if(!typed)return fail("이름을 입력하세요","pinName");
+    const name=findName(typed,o.names);
+    if(!name)return fail("명단에 없는 이름이에요. 동명이인이면 관리자가 알려준 표기(예: 홍길동A)로 입력하세요","pinName");
+    const a=ident.accounts?.[name];
+    if(!/^\d{6}$/.test(p1))return fail("PIN은 숫자 6자리예요","pin1");
+    if(!a&&p1!==p2){st.pv2="";return fail("두 PIN이 서로 달라요","pin2")}
     st.busy=true;st.err="";draw();
     try{
       if(a)await userApi.login(a.email,p1);else await userApi.register(name,p1);
-      st.pinFor=null;st.pv1=st.pv2="";
+      st.name=st.pv1=st.pv2="";
       toast(a?`${name}님 확인됐어요`:`${name}님 PIN을 등록했어요`);
     }catch(e){
       const c=e.code||"";
-      st.err=/wrong-password|invalid-credential|user-not-found|invalid-login/.test(c)?"PIN이 맞지 않아요"
+      st.err=/wrong-password|invalid-credential|user-not-found|invalid-login/.test(c)?"이름 또는 PIN이 맞지 않아요"
         :/too-many-requests/.test(c)?"틀린 시도가 많아 잠시 막혔어요. 몇 분 뒤 다시 해 주세요"
         :/operation-not-allowed/.test(c)?"Firebase에서 이메일/비밀번호 로그인이 꺼져 있어요. 관리자에게 알려주세요"
         :/permission-denied/.test(c)?"등록하지 못했어요. 방금 다른 사람이 이 이름을 등록했을 수 있어요"
         :/network/.test(c)?"네트워크 오류예요. 잠시 뒤 다시 해 주세요"
         :`확인하지 못했어요 (${c||e.message})`;
-      st.pv1=st.pv2="";st.focus=true;
+      st.pv1=st.pv2="";st.focus="pin1";
     }finally{st.busy=false;if(!ident.me&&el.isConnected)draw()}
   };
-  el.onclick=e=>{
-    const b=e.target.closest("[data-pin]");if(!b)return;
-    if(b.dataset.pin==="pick"){if(st.busy)return;st.pinFor=b.dataset.v;st.pv1=st.pv2=st.err="";st.focus=true;draw()}
-    else if(b.dataset.pin==="go")go();
-  };
+  el.onclick=e=>{if(e.target.closest("[data-pin=go]"))go()};
   draw();
 }
 
@@ -629,8 +638,7 @@ function renderHome(){
     if(!me){
       $view.innerHTML=`<div class="card"><h2>팀 점심 일정</h2><div class="sub">로그인하면 내가 참여하는 일정 조사만 보여요.</div></div><div id="login"></div>`;
       mountPinLogin(document.getElementById("login"),{names:roster,st,title:"로그인",
-        desc:"본인 이름을 고르고 PIN 6자리를 입력하세요. 처음이면 PIN을 새로 정해요. 🔒 표시는 PIN이 등록된 이름이에요.",
-        emptyText:"명단이 아직 등록되지 않았어요."});
+        desc:"이름과 PIN 6자리를 입력하세요. 처음이면 PIN 확인칸이 나타나요."});
       return;
     }
     const list=mine();
@@ -693,9 +701,8 @@ function renderRound(id){
       return;
     }
     if(!me){
-      mountPinLogin(el,{names:parts,st,title:"본인 확인",
-        desc:"이름을 고르고 PIN 6자리를 입력하세요. 처음이면 PIN을 새로 정해요. 🔒 표시는 PIN이 등록된 이름이에요.",
-        emptyText:"이번 회차 참여자가 아직 정해지지 않았어요."});
+      mountPinLogin(el,{names:members,st,title:"본인 확인",
+        desc:"이름과 PIN 6자리를 입력하세요. 처음이면 PIN 확인칸이 나타나요."});
       return;
     }
     el.innerHTML=`<div class="card">
@@ -1024,7 +1031,8 @@ function renderAdminMembers(){
     <div class="card"><h2>명단</h2><div class="sub">점심에 참여할 수 있는 사람 전체와 PIN 현황을 관리해요. 회차마다 이 중에서 참여자를 골라요.</div></div>
     <div class="card">
       <h3>전체 명단</h3>
-      <div class="sub" style="margin-bottom:8px">한 줄에 한 명씩 입력하세요. 순서대로 표시돼요. 회차를 만들 때 추가한 이름도 여기에 자동으로 들어와요.</div>
+      <div class="sub" style="margin-bottom:8px">한 줄에 한 명씩 입력하세요. 순서대로 표시돼요. 회차를 만들 때 추가한 이름도 여기에 자동으로 들어와요.<br>
+        팀원은 여기 적힌 이름을 직접 입력해서 로그인해요(띄어쓰기·대소문자 무시). <b>동명이인</b>은 '홍길동A', '홍길동B'처럼 구분해서 등록하고 본인에게 알려주세요.</div>
       <textarea id="membersTa" placeholder="홍길동&#10;김철수"></textarea>
       <div class="row mt"><button class="btn primary" data-act="saveMembers">명단 저장</button><span class="sub" id="memberCount"></span></div>
     </div>
