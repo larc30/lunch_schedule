@@ -538,9 +538,14 @@ function drawHeader(){
       ${ident.me?`<span class="me">👤 ${esc(ident.me)}님<button class="linkbtn" id="ulogout">로그아웃</button></span>`:""}
     </div></div>`;
     const ul=document.getElementById("ulogout");
-    if(ul)ul.onclick=async()=>{await userApi.logout();toast("로그아웃했어요")};
+    if(ul)ul.onclick=userLogout;
   }
   document.getElementById("ft").innerHTML=onAdmin?"":`<a href="#/admin">${adminUser?"관리자 화면으로 →":"🔒 관리자 로그인"}</a>`;
+}
+// 일반 사용자 로그아웃: 회차 화면이었으면 첫 화면(로그인)으로
+async function userLogout(){
+  await userApi.logout();toast("로그아웃했어요");
+  if((location.hash||"").startsWith("#/r/"))location.hash="#/";
 }
 function route(){
   unsubs.forEach(u=>u&&u());unsubs=[];handlers={};
@@ -745,7 +750,10 @@ function renderRound(id){
   // 전체 현황: 이름 없이 날짜별 가능 인원만(히트맵) + 요약 + 새로고침
   const drawStatus=()=>{
     const el=document.getElementById("status");if(!el)return;
-    const parts=participantsOf(round,members),s=summarize(round,parts,responses),cand=new Set(s.dates);
+    const parts=participantsOf(round,members);
+    // 로그인 전이거나 이 회차 참여자가 아니면 현황 숨김
+    if(!ident.me||!parts.includes(ident.me)){el.innerHTML="";return}
+    const s=summarize(round,parts,responses),cand=new Set(s.dates);
     el.innerHTML=`<div class="card">
       <div class="row between" style="margin-bottom:6px">
         <h3 style="margin:0">전체 현황</h3>
@@ -1090,7 +1098,7 @@ function renderAdminMembers(){
     if(DEMO){
       const l=localApis();userApi=l.user;adminApi=l.admin;
       document.getElementById("banner").innerHTML=`<div class="banner">데모 모드: 데이터가 이 브라우저에만 저장돼요. <button class="linkbtn" id="demoSwitch">로그아웃(다른 사람으로 테스트)</button></div>`;
-      document.getElementById("demoSwitch").onclick=()=>{userApi.logout();toast("로그아웃했어요")};
+      document.getElementById("demoSwitch").onclick=userLogout;
     }else{
       const V="10.12.2",B=`https://www.gstatic.com/firebasejs/${V}`;
       const [{initializeApp},fs,au]=await Promise.all([import(`${B}/firebase-app.js`),import(`${B}/firebase-firestore.js`),import(`${B}/firebase-auth.js`)]);
