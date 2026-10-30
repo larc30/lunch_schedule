@@ -71,6 +71,9 @@
   .chip:hover{border-color:var(--accent)}
   .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
   .chip .lock{font-size:11px;margin-left:2px}
+  .newtag{font-size:11px;background:var(--warn-soft);color:var(--warn);border-radius:999px;padding:0 6px;margin-left:4px}
+  .pk-add{display:flex;gap:8px;margin-top:12px}
+  .pk-add input[type=text]{flex:1;min-width:0;max-width:280px}
   .pinbox{margin-top:16px;padding:14px 16px;background:#f8f9fb;border:1px solid var(--line);border-radius:10px}
   .pin-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 6px}
   .pin-row input[type=password]{width:150px;letter-spacing:.25em}
@@ -219,12 +222,14 @@ function showError(msg){document.getElementById("banner").innerHTML=`<div class=
 function fmtTime(ts){const d=new Date(ts);return [d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,"0")).join(":")}
 function syncText(ts){return ts?`자동 갱신 중 · 마지막 ${fmtTime(ts)}`:""}
 
-// ── 집계·응답표 (일반 현황과 관리자 결과 공용) ─
+// ── 회차 참여자: 회차에 지정된 참여자, 없으면(예전 회차) 전체 명단 ─
+function participantsOf(round,roster){return Array.isArray(round?.members)?round.members:(roster||[])}
+
+// ── 집계·응답표 (일반 현황과 관리자 결과 공용) — 참여자 응답만 집계 ─
 function summarize(round,members,responses){
-  const dates=datesOf(round);
-  const rows=[...members,...Object.keys(responses).filter(n=>!members.includes(n))];
+  const dates=datesOf(round),rows=members.slice();
   const heat={};dates.forEach(d=>heat[d]=0);
-  Object.values(responses).forEach(r=>(r.picks?.date||[]).forEach(d=>{if(d in heat)heat[d]++}));
+  members.forEach(m=>(responses[m]?.picks?.date||[]).forEach(d=>{if(d in heat)heat[d]++}));
   const max=Math.max(0,...Object.values(heat));
   const best=new Set(max>0?dates.filter(d=>heat[d]===max):[]);
   const top=dates.filter(d=>heat[d]>0).sort((a,b)=>heat[b]-heat[a]||a.localeCompare(b)).slice(0,3);
@@ -241,6 +246,48 @@ function matrixHtml(s,responses,me){
       <td>${r?p.size:"-"}</td></tr>`}).join("");
   const foot=`<tr class="foot"><td class="nm">가능 인원</td>${s.dates.map(d=>`<td class="tot ${s.best.has(d)?"best":""}">${s.heat[d]}</td>`).join("")}<td></td></tr>`;
   return `<div class="mx-wrap"><table class="mx"><thead><tr><th class="nm">이름</th>${head}<th>계</th></tr></thead><tbody>${body}${foot}</tbody></table></div>`;
+}
+
+// ── 참여자 선택 (관리자): 명단 체크 + 명단에 없는 이름 추가 ─
+// o.roster(): 현재 명단, o.sel: Set, o.onChange()
+function mountPicker(el,o){
+  const st=o.state||{typed:""}; // 다시 그려도 입력 중인 이름 유지
+  const draw=()=>{
+    const roster=o.roster(),names=[...roster,...[...o.sel].filter(n=>!roster.includes(n))];
+    el.innerHTML=`
+      <div class="row between" style="margin-bottom:10px">
+        <span class="sub"><b>${o.sel.size}명</b> 선택 · 전체 명단 ${roster.length}명</span>
+        <div class="row"><button type="button" class="btn sm" data-pk="all">전체 선택</button><button type="button" class="btn sm" data-pk="none">전체 해제</button></div>
+      </div>
+      ${names.length?`<div class="chips">${names.map(n=>`<button type="button" class="chip ${o.sel.has(n)?"on":""}" data-pk="tog" data-v="${esc(n)}">${o.sel.has(n)?"✓ ":""}${esc(n)}${roster.includes(n)?"":`<span class="newtag">명단 추가 예정</span>`}</button>`).join("")}</div>`
+        :`<span class="muted">명단이 비어 있어요. 아래에서 이름을 추가하세요.</span>`}
+      <div class="pk-add"><input type="text" id="pkIn" maxlength="20" placeholder="명단에 없는 이름 추가"><button type="button" class="btn sm" data-pk="add">추가</button></div>
+      <div class="sub" style="margin-top:6px">추가한 이름은 저장할 때 전체 명단에도 등록돼요.</div>`;
+    const inp=el.querySelector("#pkIn");inp.value=st.typed;
+    inp.oninput=()=>{st.typed=inp.value};
+    inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();act("add")}};
+  };
+  const act=(a,v)=>{
+    if(a==="tog"){o.sel.has(v)?o.sel.delete(v):o.sel.add(v)}
+    else if(a==="all"){o.roster().forEach(n=>o.sel.add(n))}
+    else if(a==="none"){o.sel.clear()}
+    else if(a==="add"){
+      const n=st.typed.replace(/\//g,"").trim();if(!n)return;
+      if(o.roster().includes(n))toast("이미 명단에 있어 선택했어요");
+      o.sel.add(n);st.typed="";
+    }
+    o.onChange?.();draw();
+    if(a==="add")el.querySelector("#pkIn")?.focus();
+  };
+  el.onclick=e=>{const b=e.target.closest("[data-pk]");if(b)act(b.dataset.pk,b.dataset.v)};
+  draw();
+  return {redraw:draw};
+}
+// 선택된 참여자를 명단 순서대로 정리 + 새 이름은 명단에 등록
+function orderedParticipants(sel,roster){return [...roster.filter(n=>sel.has(n)),...[...sel].filter(n=>!roster.includes(n))]}
+async function addToRoster(names,roster){
+  const add=names.filter(n=>!roster.includes(n));
+  if(add.length)await adminApi.saveMembers([...roster,...add]);
 }
 
 // ── 한국 공휴일 ───────────────────────────────
@@ -469,7 +516,7 @@ function drawHeader(){
       </div></div>
       <div class="bar2"><div class="wrap">
         <a href="#/admin" class="${tab==="rounds"?"on":""}">회차</a>
-        <a href="#/admin/members" class="${tab==="members"?"on":""}">팀원</a>
+        <a href="#/admin/members" class="${tab==="members"?"on":""}">명단</a>
         <a href="#/" class="ext">일반 화면 →</a>
       </div></div>`;
     document.getElementById("logout").onclick=async()=>{await adminApi.logout();toast("로그아웃했어요");location.hash="#/"};
@@ -543,15 +590,23 @@ function renderRound(id){
   const drawMine=()=>{
     const el=document.getElementById("mine");if(!el)return;
     const me=ident.me,acc=ident.accounts,open=round.status==="open",dates=datesOf(round),cand=new Set(dates);
+    const parts=participantsOf(round,members);
+    if(me&&!parts.includes(me)){
+      el.innerHTML=`<div class="card">
+        <h3>이번 회차 참여자가 아니에요</h3>
+        <div class="sub">👤 <b>${esc(me)}</b>님은 이 회차 참여자 명단에 없어요. 참여해야 한다면 관리자에게 요청하고, 다른 이름이면 오른쪽 위 로그아웃 후 다시 선택하세요.</div>
+      </div>`;
+      return;
+    }
     if(!me){
-      if(pinFor&&!members.includes(pinFor))pinFor=null;
+      if(pinFor&&!parts.includes(pinFor))pinFor=null;
       const isNew=pinFor&&!acc[pinFor],focused=document.activeElement?.id;
       el.innerHTML=`<div class="card">
         <h3>본인 확인</h3>
         <div class="sub" style="margin-bottom:12px">이름을 고르고 PIN 6자리를 입력하세요. 처음이면 PIN을 새로 정해요. 🔒 표시는 PIN이 등록된 이름이에요.</div>
-        ${members.length?`<div class="chips">${members.map(m=>
+        ${parts.length?`<div class="chips">${parts.map(m=>
             `<button class="chip ${m===pinFor?"on":""}" data-act="pick" data-v="${esc(m)}">${esc(m)}${acc[m]?`<span class="lock">🔒</span>`:""}</button>`).join("")}</div>`
-          :`<span class="muted">팀원이 아직 등록되지 않았어요.</span>`}
+          :`<span class="muted">이번 회차 참여자가 아직 정해지지 않았어요.</span>`}
         ${pinFor?`<div class="pinbox">
           <div>${isNew?`<b>${esc(pinFor)}</b>님, 처음이시네요. 앞으로 쓸 PIN 6자리를 정해 주세요.`:`<b>${esc(pinFor)}</b>님의 PIN 6자리를 입력하세요.`}</div>
           <div class="pin-row">
@@ -604,14 +659,14 @@ function renderRound(id){
   // 전체 현황: 이름 없이 날짜별 가능 인원만(히트맵) + 요약 + 새로고침
   const drawStatus=()=>{
     const el=document.getElementById("status");if(!el)return;
-    const s=summarize(round,members,responses),cand=new Set(s.dates);
+    const parts=participantsOf(round,members),s=summarize(round,parts,responses),cand=new Set(s.dates);
     el.innerHTML=`<div class="card">
       <div class="row between" style="margin-bottom:6px">
         <h3 style="margin:0">전체 현황</h3>
         <div class="row"><span class="sub">${syncText(lastSync)}</span><button class="btn sm" data-act="refresh">↻ 새로고침</button></div>
       </div>
       ${respErr?`<div class="sub">현황을 불러오지 못했어요. 관리자에게 보안 규칙이 최신인지 확인을 요청해 주세요.</div>`:`
-        <div class="sub" style="margin-bottom:12px">응답 <b>${s.responded}/${members.length}명</b> · 최다 가능일 <b>${topText(s)}</b><br>칸의 숫자는 그날 가능한 인원이에요 (이름 비공개)</div>
+        <div class="sub" style="margin-bottom:12px">응답 <b>${s.responded}/${parts.length}명</b> · 최다 가능일 <b>${topText(s)}</b><br>칸의 숫자는 그날 가능한 인원이에요 (이름 비공개)</div>
         <div id="heat"></div>
         <div class="legend mt"><span>적음</span><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i><span>많음 · ★ 최다</span></div>`}
     </div>`;
@@ -703,7 +758,7 @@ function adminGate(render){
 
 // ── 관리자: 회차 목록 ─────────────────────────
 function renderAdminHome(){
-  let rounds=[],members=[],counts={},countSubs={};
+  let rounds=[],members=[],resps={},countSubs={};
   $view.innerHTML=`
     <div class="card"><div class="row between">
       <div><h2>회차</h2><div class="sub">회차를 만들고 전체 응답을 확인해요.</div></div>
@@ -715,7 +770,7 @@ function renderAdminHome(){
       <div class="ritem">
         <div>
           <a href="#/admin/r/${encodeURIComponent(r.id)}"><b>${esc(r.title)}</b></a>${badge(r)}
-          <div class="sub">${esc(dateSummary(r))} · 응답 ${counts[r.id]??"-"}/${members.length}</div>
+          <div class="sub">${esc(dateSummary(r))} · 응답 ${(()=>{const p=participantsOf(r,members);return resps[r.id]?p.filter(m=>resps[r.id][m]).length:"-"})()}/${participantsOf(r,members).length}명</div>
         </div>
         <div class="row">
           <a class="btn sm" href="#/admin/r/${encodeURIComponent(r.id)}">결과 보기</a>
@@ -728,7 +783,7 @@ function renderAdminHome(){
   const syncCounts=()=>{
     const ids=new Set(rounds.map(r=>r.id));
     for(const id of Object.keys(countSubs))if(!ids.has(id)){countSubs[id]();delete countSubs[id]}
-    for(const id of ids)if(!countSubs[id])countSubs[id]=adminApi.watchResponses(id,r=>{counts[id]=Object.keys(r).length;drawRounds()});
+    for(const id of ids)if(!countSubs[id])countSubs[id]=adminApi.watchResponses(id,r=>{resps[id]=r;drawRounds()});
   };
   const find=el=>rounds.find(x=>x.id===el.dataset.id);
   handlers={
@@ -746,6 +801,7 @@ function renderAdminHome(){
 // ── 관리자: 새 회차 ───────────────────────────
 function renderAdminNew(){
   const t=new Date();let base=[t.getFullYear(),t.getMonth()],sel=new Set(),titleTouched=false;
+  let roster=[],rosterInit=false,picker=null;const parts=new Set();
   $view.innerHTML=`
     <div class="card"><h2>새 회차 만들기</h2><div class="sub">후보 날짜를 고르면 팀원이 그중 가능한 날을 체크해요.</div></div>
     <div class="card">
@@ -765,7 +821,9 @@ function renderAdminNew(){
         <button class="btn sm" data-act="next">다음 달 ▶</button>
       </div>
       <div id="cal"></div>
-      <div class="row mt"><button class="btn primary" data-act="create">회차 만들기</button></div>
+      <label class="f" style="margin-top:20px">참여자</label>
+      <div id="picker"></div>
+      <div class="row mt" style="margin-top:20px"><button class="btn primary" data-act="create">회차 만들기</button></div>
     </div>`;
   const titleEl=document.getElementById("title"),calEl=document.getElementById("cal"),today=todayStr();
   titleEl.addEventListener("input",()=>{titleTouched=true});
@@ -797,24 +855,36 @@ function renderAdminNew(){
       const title=titleEl.value.trim();
       if(!title)return toast("제목을 입력하세요");
       if(!sel.size)return toast("후보 날짜를 골라 주세요");
-      try{const id=await adminApi.createRound({title,status:"open",items:{date:[...sel].sort()}});location.hash=`#/admin/r/${encodeURIComponent(id)}`}
-      catch(e){toast("생성 실패: "+e.message)}
+      if(!parts.size)return toast("참여자를 1명 이상 골라 주세요");
+      try{
+        const list=orderedParticipants(parts,roster);
+        await addToRoster(list,roster);
+        const id=await adminApi.createRound({title,status:"open",items:{date:[...sel].sort()},members:list});
+        location.hash=`#/admin/r/${encodeURIComponent(id)}`;
+      }catch(e){toast("생성 실패: "+e.message)}
     }
   };
   drawCal();
+  picker=mountPicker(document.getElementById("picker"),{roster:()=>roster,sel:parts});
+  unsubs.push(adminApi.watchMembers(m=>{
+    roster=m;
+    if(!rosterInit){rosterInit=true;m.forEach(n=>parts.add(n))} // 처음엔 전원 선택
+    picker.redraw();
+  }));
 }
 
 // ── 관리자: 결과 ──────────────────────────────
 function renderAdminRound(id){
   let round,loaded=false,members=[],responses={},picked=null,lastSync=null;
+  let pSel=new Set(),pDirty=false,pSig="";const pState={typed:""};
   const touch=()=>{lastSync=Date.now()};
+  const parts=()=>participantsOf(round,members);
 
   const drawPick=()=>{
     const el=document.getElementById("pick");if(!el)return;
     if(!picked){el.innerHTML="";return}
-    const yes=[],no=[];
-    for(const r of Object.values(responses))((r.picks?.date||[]).includes(picked)?yes:no).push(r.name);
-    const pending=members.filter(m=>!responses[m]);
+    const yes=[],no=[],pending=[];
+    for(const m of parts()){const r=responses[m];if(!r)pending.push(m);else((r.picks?.date||[]).includes(picked)?yes:no).push(m)}
     el.innerHTML=`<b>${fmtDate(picked)}</b> — 가능 ${yes.length}명: ${esc(yes.join(", "))||"-"}<br>
       <span class="sub">불가: ${esc(no.join(", "))||"-"} · 미응답: ${esc(pending.join(", "))||"-"}</span>`;
   };
@@ -822,7 +892,8 @@ function renderAdminRound(id){
   const draw=()=>{
     if(!loaded)return;
     if(!round){$view.innerHTML=`<div class="card">회차를 찾을 수 없어요. <a href="#/admin">회차 목록으로</a></div>`;return}
-    const s=summarize(round,members,responses),cand=new Set(s.dates),open=round.status==="open";
+    const p=parts(),s=summarize(round,p,responses),cand=new Set(s.dates),open=round.status==="open";
+    const sig=JSON.stringify(p);if(!pDirty&&sig!==pSig){pSig=sig;pSel=new Set(p)}
     $view.innerHTML=`
       <div class="card">
         <div class="row between">
@@ -840,7 +911,7 @@ function renderAdminRound(id){
           <div class="row"><span class="sub">${syncText(lastSync)}</span><button class="btn sm" data-act="refresh">↻ 새로고침</button></div>
         </div>
         <div class="stats">
-          <div class="stat"><div class="sub">응답</div><div class="big">${s.responded} / ${members.length}명</div></div>
+          <div class="stat"><div class="sub">응답</div><div class="big">${s.responded} / ${p.length}명</div></div>
           <div class="stat"><div class="sub">최다 가능일</div>
             <div class="big">${topText(s)}</div>
             ${s.top.length>1?`<div class="sub">${s.top.slice(1).map(d=>`${fmtDate(d)} ${s.heat[d]}명`).join(" / ")}</div>`:""}
@@ -857,7 +928,17 @@ function renderAdminRound(id){
         <div id="cal"></div>
         <div class="pick" id="pick"></div>
       </div>
-      <div class="card"><h3>응답표</h3>${matrixHtml(s,responses,null)}</div>`;
+      <div class="card"><h3>응답표</h3>${matrixHtml(s,responses,null)}</div>
+      <div class="card">
+        <h3>참여자</h3>
+        <div class="sub" style="margin-bottom:12px">${Array.isArray(round.members)?"이 회차에 응답할 사람이에요. 빼도 그 사람의 응답 데이터는 남고 집계에서만 빠져요."
+          :"이 회차는 참여자를 따로 정하지 않아 <b>전체 명단</b> 기준이에요. 저장하면 이 회차만 고정돼요."}</div>
+        <div id="picker"></div>
+        <div class="row mt"><button class="btn primary" data-act="saveParts">참여자 저장</button>
+          <span class="sub" id="pSt">${pDirty?`<span style="color:var(--warn)">저장하지 않은 변경이 있어요</span>`:""}</span></div>
+      </div>`;
+    mountPicker(document.getElementById("picker"),{roster:()=>members,sel:pSel,state:pState,onChange:()=>{
+      pDirty=true;const el=document.getElementById("pSt");if(el)el.innerHTML=`<span style="color:var(--warn)">저장하지 않은 변경이 있어요</span>`}});
     if(s.dates.length){
       mountCalendar(document.getElementById("cal"),{
         months:monthsBetween(s.dates[0],s.dates[s.dates.length-1]),isEnabled:d=>cand.has(d),
@@ -872,7 +953,15 @@ function renderAdminRound(id){
     copyLink:()=>copy(roundUrl(id)),
     copyMail:()=>copy(mailText(round)),
     toggleStatus:()=>adminApi.updateRound(id,{status:round.status==="open"?"closed":"open"}),
-    refresh:()=>location.reload()
+    refresh:()=>location.reload(),
+    saveParts:async()=>{
+      if(!pSel.size)return toast("참여자를 1명 이상 골라 주세요");
+      const list=orderedParticipants(pSel,members);
+      const dropped=parts().filter(n=>!pSel.has(n)&&responses[n]);
+      if(dropped.length&&!confirm(`${dropped.join(", ")}님은 이미 응답했어요. 빼면 집계에서 빠져요(응답 데이터는 남아요). 계속할까요?`))return;
+      try{await addToRoster(list,members);await adminApi.updateRound(id,{members:list});pDirty=false;pSig="";draw();toast("참여자를 저장했어요")}
+      catch(e){toast("저장 실패: "+e.message)}
+    }
   };
   unsubs.push(
     adminApi.watchRound(id,r=>{round=r;loaded=true;touch();draw()}),
@@ -881,20 +970,20 @@ function renderAdminRound(id){
   );
 }
 
-// ── 관리자: 팀원 + 본인 확인 현황 ─────────────
+// ── 관리자: 명단 + PIN 현황 ───────────────────
 function renderAdminMembers(){
   let members=[],accounts={},dirty=false;
   $view.innerHTML=`
-    <div class="card"><h2>팀원</h2><div class="sub">응답할 수 있는 이름과 본인 확인 현황을 관리해요.</div></div>
+    <div class="card"><h2>명단</h2><div class="sub">점심에 참여할 수 있는 사람 전체와 PIN 현황을 관리해요. 회차마다 이 중에서 참여자를 골라요.</div></div>
     <div class="card">
-      <h3>팀원 목록</h3>
-      <div class="sub" style="margin-bottom:8px">한 줄에 한 명씩 입력하세요. 순서대로 표시돼요.</div>
+      <h3>전체 명단</h3>
+      <div class="sub" style="margin-bottom:8px">한 줄에 한 명씩 입력하세요. 순서대로 표시돼요. 회차를 만들 때 추가한 이름도 여기에 자동으로 들어와요.</div>
       <textarea id="membersTa" placeholder="홍길동&#10;김철수"></textarea>
-      <div class="row mt"><button class="btn primary" data-act="saveMembers">팀원 저장</button><span class="sub" id="memberCount"></span></div>
+      <div class="row mt"><button class="btn primary" data-act="saveMembers">명단 저장</button><span class="sub" id="memberCount"></span></div>
     </div>
     <div class="card">
       <h3>PIN 등록 현황</h3>
-      <div class="sub" style="margin-bottom:14px">팀원은 이름 + PIN 6자리로 본인 확인을 해요. PIN을 잊었거나 다른 사람이 잘못 등록했으면 초기화하세요. 기존 응답은 유지되고, 다음 접속 때 PIN을 새로 정해요.</div>
+      <div class="sub" style="margin-bottom:14px">각자 이름 + PIN 6자리로 본인 확인을 해요. PIN을 잊었거나 다른 사람이 잘못 등록했으면 초기화하세요. 기존 응답은 유지되고, 다음 접속 때 PIN을 새로 정해요.</div>
       <div id="claimList"></div>
     </div>`;
   const ta=document.getElementById("membersTa");
@@ -907,15 +996,15 @@ function renderAdminMembers(){
     const names=[...members,...Object.keys(accounts).filter(n=>!members.includes(n))];
     document.getElementById("claimList").innerHTML=names.length?names.map(n=>{const c=accounts[n];
       return `<div class="ritem">
-        <div><b>${esc(n)}</b>${members.includes(n)?"":` <span class="sub">(팀원 목록에 없음)</span>`}
+        <div><b>${esc(n)}</b>${members.includes(n)?"":` <span class="sub">(명단에 없음)</span>`}
           <div class="sub">${c?`<span class="ok">● PIN 등록됨</span> · ${fmtDT(c.createdAt)}`:"○ 아직 PIN 미등록"}</div></div>
         ${c?`<button class="btn sm danger" data-act="reset" data-v="${esc(n)}">PIN 초기화</button>`:""}
-      </div>`}).join(""):`<span class="muted">팀원을 먼저 등록하세요.</span>`;
+      </div>`}).join(""):`<span class="muted">명단을 먼저 등록하세요.</span>`;
   };
   handlers={
     saveMembers:async()=>{
       const list=[...new Set(ta.value.split("\n").map(s=>s.replace(/\//g,"").trim()).filter(Boolean))];
-      try{await adminApi.saveMembers(list);dirty=false;toast("팀원을 저장했어요")}
+      try{await adminApi.saveMembers(list);dirty=false;toast("명단을 저장했어요")}
       catch(e){toast("저장 실패: "+e.message)}
     },
     reset:async el=>{
