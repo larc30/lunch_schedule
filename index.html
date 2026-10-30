@@ -75,6 +75,10 @@
   .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
   .chip .lock{font-size:11px;margin-left:2px}
   .newtag{font-size:11px;background:var(--warn-soft);color:var(--warn);border-radius:999px;padding:0 6px;margin-left:4px}
+  .add-row{display:flex;gap:8px;align-items:flex-start}
+  .add-row textarea{min-height:0;height:auto;flex:1}
+  .person{display:flex;align-items:center;gap:12px}
+  .idx{min-width:22px;color:var(--faint);font-size:12px;text-align:right}
   .pk-add{display:flex;gap:8px;margin-top:12px}
   .pk-add input[type=text]{flex:1;min-width:0;max-width:280px}
   .pinbox{margin-top:16px;padding:14px 16px;background:#f8f9fb;border:1px solid var(--line);border-radius:10px}
@@ -1042,53 +1046,102 @@ function renderAdminRound(id){
   );
 }
 
-// ── 관리자: 명단 + PIN 현황 ───────────────────
+// ── 관리자: 명단 (사람별 목록 + PIN 현황) ──────
 function renderAdminMembers(){
-  let members=[],accounts={},dirty=false;
+  let members=[],accounts={},q="",addText="";
   $view.innerHTML=`
-    <div class="card"><h2>명단</h2><div class="sub">점심에 참여할 수 있는 사람 전체와 PIN 현황을 관리해요. 회차마다 이 중에서 참여자를 골라요.</div></div>
+    <div class="card"><h2>명단</h2><div class="sub">약속에 참여할 수 있는 사람 전체예요. 회차마다 이 중에서 참여자를 골라요. 각자 여기 적힌 이름을 직접 입력해서 로그인해요(띄어쓰기·대소문자 무시).</div></div>
     <div class="card">
-      <h3>전체 명단</h3>
-      <div class="sub" style="margin-bottom:8px">한 줄에 한 명씩 입력하세요. 순서대로 표시돼요. 회차를 만들 때 추가한 이름도 여기에 자동으로 들어와요.<br>
-        팀원은 여기 적힌 이름을 직접 입력해서 로그인해요(띄어쓰기·대소문자 무시). <b>동명이인</b>은 '홍길동A', '홍길동B'처럼 구분해서 등록하고 본인에게 알려주세요.</div>
-      <textarea id="membersTa" placeholder="홍길동&#10;김철수"></textarea>
-      <div class="row mt"><button class="btn primary" data-act="saveMembers">명단 저장</button><span class="sub" id="memberCount"></span></div>
+      <h3>이름 추가</h3>
+      <div class="add-row"><textarea id="addTa" rows="2" maxlength="2000" placeholder="이름 (여러 명은 줄바꿈·쉼표로 구분)"></textarea>
+        <button class="btn primary" data-act="add">추가</button></div>
+      <div class="sub" style="margin-top:6px">엑셀에서 이름 열을 복사해 붙여넣어도 돼요. 동명이인은 '홍길동A', '홍길동B'처럼 구분해서 등록하고 본인에게 알려주세요.</div>
     </div>
     <div class="card">
-      <h3>PIN 등록 현황</h3>
-      <div class="sub" style="margin-bottom:14px">각자 이름 + PIN 6자리로 본인 확인을 해요. PIN을 잊었거나 다른 사람이 잘못 등록했으면 초기화하세요. 기존 응답은 유지되고, 다음 접속 때 PIN을 새로 정해요.</div>
-      <div id="claimList"></div>
-    </div>`;
-  const ta=document.getElementById("membersTa");
-  ta.addEventListener("input",()=>{dirty=true});
-  const drawMembers=()=>{
-    if(!dirty)ta.value=members.join("\n");
-    document.getElementById("memberCount").textContent=`현재 ${members.length}명`;
+      <div class="row between" style="margin-bottom:6px">
+        <h3 style="margin:0" id="cntTitle">전체 명단</h3>
+        <div class="row"><input type="text" id="q" placeholder="이름 검색" style="width:150px"><button class="btn sm" data-act="sort">가나다순 정렬</button></div>
+      </div>
+      <div id="list"></div>
+    </div>
+    <div id="orphans"></div>`;
+  const ta=document.getElementById("addTa"),qi=document.getElementById("q");
+  ta.oninput=()=>{addText=ta.value};
+  ta.onkeydown=e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();handlers.add()}};
+  qi.oninput=()=>{q=qi.value;drawList()};
+
+  const pinLine=a=>a?`<span class="ok">● PIN 등록됨</span> · ${fmtDT(a.createdAt)}`:`<span class="muted">○ PIN 미등록</span>`;
+  const drawList=()=>{
+    const k=normName(q),shown=members.map((n,i)=>[n,i]).filter(([n])=>!k||normName(n).includes(k));
+    const reg=members.filter(n=>accounts[n]).length;
+    document.getElementById("cntTitle").innerHTML=`전체 명단 <span class="sub" style="font-weight:400">${members.length}명 · PIN 등록 ${reg}명</span>`;
+    document.getElementById("list").innerHTML=!members.length?`<span class="muted">아직 아무도 없어요. 위에서 이름을 추가하세요.</span>`
+      :!shown.length?`<span class="muted">'${esc(q)}'에 해당하는 이름이 없어요.</span>`
+      :shown.map(([n,i])=>`<div class="ritem">
+        <div class="person"><span class="idx">${i+1}</span><div><b>${esc(n)}</b><div class="sub">${pinLine(accounts[n])}</div></div></div>
+        <div class="row">
+          ${accounts[n]?`<button class="btn sm" data-act="reset" data-v="${esc(n)}">PIN 초기화</button>`:""}
+          <button class="btn sm danger" data-act="del" data-v="${esc(n)}">삭제</button>
+        </div>
+      </div>`).join("");
+    const orphans=Object.keys(accounts).filter(n=>!members.includes(n));
+    document.getElementById("orphans").innerHTML=orphans.length?`<div class="card">
+      <h3>명단에 없는 PIN</h3>
+      <div class="sub" style="margin-bottom:6px">명단에서 빠졌지만 PIN이 남아 있는 이름이에요. 같은 이름을 다시 추가하면 예전 PIN이 살아나니 필요 없으면 삭제하세요.</div>
+      ${orphans.map(n=>`<div class="ritem">
+        <div><b>${esc(n)}</b><div class="sub">${pinLine(accounts[n])}</div></div>
+        <div class="row">
+          <button class="btn sm" data-act="readd" data-v="${esc(n)}">명단에 다시 추가</button>
+          <button class="btn sm danger" data-act="pinDel" data-v="${esc(n)}">PIN 삭제</button>
+        </div>
+      </div>`).join("")}</div>`:"";
   };
-  const drawClaims=()=>{
-    const names=[...members,...Object.keys(accounts).filter(n=>!members.includes(n))];
-    document.getElementById("claimList").innerHTML=names.length?names.map(n=>{const c=accounts[n];
-      return `<div class="ritem">
-        <div><b>${esc(n)}</b>${members.includes(n)?"":` <span class="sub">(명단에 없음)</span>`}
-          <div class="sub">${c?`<span class="ok">● PIN 등록됨</span> · ${fmtDT(c.createdAt)}`:"○ 아직 PIN 미등록"}</div></div>
-        ${c?`<button class="btn sm danger" data-act="reset" data-v="${esc(n)}">PIN 초기화</button>`:""}
-      </div>`}).join(""):`<span class="muted">명단을 먼저 등록하세요.</span>`;
-  };
+
+  const run=async(fn,ok)=>{try{await fn();if(ok)toast(ok)}catch(e){toast("실패: "+e.message)}};
   handlers={
-    saveMembers:async()=>{
-      const list=[...new Set(ta.value.split("\n").map(s=>s.replace(/\//g,"").trim()).filter(Boolean))];
-      try{await adminApi.saveMembers(list);dirty=false;toast("명단을 저장했어요")}
-      catch(e){toast("저장 실패: "+e.message)}
+    add:async()=>{
+      const raw=addText.split(/[\n,;\t]+/).map(s=>s.replace(/\//g,"").trim()).filter(Boolean);
+      if(!raw.length)return toast("이름을 입력하세요");
+      const add=[],dup=[];
+      for(const n of raw){
+        if(n.length>20){dup.push(n.slice(0,10)+"…(20자 초과)");continue}
+        if(findName(n,[...members,...add]))dup.push(n);else add.push(n);
+      }
+      if(!add.length)return toast(`이미 있는 이름이에요: ${dup.join(", ")}`);
+      // 예전 PIN이 남아 있는 이름은 처리 방법 확인
+      const old=add.filter(n=>accounts[n]);
+      if(old.length&&confirm(`${old.join(", ")}님은 예전 PIN이 남아 있어요.\n\n[확인] 예전 PIN을 지우고 추가 (처음 로그인할 때 새로 설정)\n[취소] 예전 PIN 그대로 사용`)){
+        for(const n of old)await adminApi.resetAccount(n);
+      }
+      await run(()=>adminApi.saveMembers([...members,...add]),
+        `${add.length}명 추가했어요${dup.length?` (제외: ${dup.join(", ")})`:""}`);
+      addText="";ta.value="";ta.focus();
+    },
+    del:async el=>{
+      const n=el.dataset.v,a=accounts[n];
+      if(!confirm(`'${n}'님을 명단에서 삭제할까요?${a?"\n등록된 PIN도 같이 삭제돼요.":""}\n\n이미 만든 회차의 참여자 목록과 응답은 그대로 남아요.`))return;
+      await run(async()=>{await adminApi.saveMembers(members.filter(x=>x!==n));if(a)await adminApi.resetAccount(n)},"삭제했어요");
     },
     reset:async el=>{
       const n=el.dataset.v;
-      if(!confirm(`'${n}'의 PIN을 초기화할까요?\n\n기존 응답은 유지되고, 다음 접속 때 PIN을 새로 정해요.`))return;
-      try{await adminApi.resetAccount(n);toast("초기화했어요")}catch(e){toast("초기화 실패: "+e.message)}
+      if(!confirm(`'${n}'님의 PIN을 초기화할까요?\n\n기존 응답은 유지되고, 다음 로그인 때 PIN을 새로 정해요.`))return;
+      await run(()=>adminApi.resetAccount(n),"초기화했어요");
+    },
+    sort:async()=>{
+      const sorted=[...members].sort((a,b)=>a.localeCompare(b,"ko"));
+      if(JSON.stringify(sorted)===JSON.stringify(members))return toast("이미 가나다순이에요");
+      await run(()=>adminApi.saveMembers(sorted),"가나다순으로 정렬했어요");
+    },
+    readd:async el=>{const n=el.dataset.v;await run(()=>adminApi.saveMembers([...members,n]),`${n}님을 다시 추가했어요 (예전 PIN 유지)`)},
+    pinDel:async el=>{
+      const n=el.dataset.v;
+      if(!confirm(`'${n}'님의 남은 PIN을 삭제할까요?`))return;
+      await run(()=>adminApi.resetAccount(n),"PIN을 삭제했어요");
     }
   };
   unsubs.push(
-    adminApi.watchMembers(m=>{members=m;drawMembers();drawClaims()}),
-    adminApi.watchAccounts(c=>{accounts=c;drawClaims()})
+    adminApi.watchMembers(m=>{members=m;drawList()}),
+    adminApi.watchAccounts(c=>{accounts=c;drawList()})
   );
 }
 
